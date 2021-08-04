@@ -1,9 +1,9 @@
 import numpy as np
 import pyart
 import scipy.ndimage.filters
+from scipy.signal import savgol_filter
 
-
-def J_function(winds, parameters):
+def radial_velocity_function(winds, parameters):
     """
     Calculates the total cost function. This typically does not need to be
     called directly as get_dd_wind_field is a wrapper around this function and
@@ -34,68 +34,147 @@ def J_function(winds, parameters):
          winds[0], winds[1], winds[2], parameters.wts, rmsVr=parameters.rmsVr,
          weights=parameters.weights, coeff=parameters.Co)
 
-    if(parameters.Cm > 0):
-        Jmass = calculate_mass_continuity(
-            winds[0], winds[1], winds[2], parameters.z,
-            parameters.dx, parameters.dy, parameters.dz,
-            coeff=parameters.Cm)
-    else:
-        Jmass = 0
+    grad = grad_radial_velocity(winds, parameters) 
 
-    if(parameters.Cx > 0 or parameters.Cy > 0 or parameters.Cz > 0):
-        Jsmooth = calculate_smoothness_cost(
-            winds[0], winds[1], winds[2], Cx=parameters.Cx,
-            Cy=parameters.Cy, Cz=parameters.Cz)
-    else:
-        Jsmooth = 0
+    return Jvel, grad
 
-    if(parameters.Cb > 0):
-        Jbackground = calculate_background_cost(
-            winds[0], winds[1], winds[2], parameters.bg_weights,
-            parameters.u_back, parameters.v_back, parameters.Cb)
-    else:
-        Jbackground = 0
+def al_mass_cont_function(winds, parameters, mult, mu):
 
-    if(parameters.Cv > 0):
-        Jvorticity = calculate_vertical_vorticity_cost(
-            winds[0], winds[1], winds[2], parameters.dx,
-            parameters.dy, parameters.dz, parameters.Ut,
-            parameters.Vt, coeff=parameters.Cv)
-    else:
-        Jvorticity = 0
-
-    if(parameters.Cmod > 0):
-        Jmod = calculate_model_cost(
-            winds[0], winds[1], winds[2],
-            parameters.model_weights, parameters.u_model,
-            parameters.v_model,
-            parameters.w_model, coeff=parameters.Cmod)
-    else:
-        Jmod = 0
-
-    if parameters.Cpoint > 0:
-        Jpoint = calculate_point_cost(
-            winds[0], winds[1], parameters.x, parameters.y, parameters.z,
-            parameters.point_list, Cp=parameters.Cpoint, roi=parameters.roi)
-    else:
-        Jpoint = 0
-
-    if(parameters.print_out is True):
-        print(('| Jvel    | Jmass   | Jsmooth |   Jbg   | Jvort   | Jmodel  | Jpoint  |' +
-               ' Max w  '))
-        print(('|' + "{:9.4f}".format(Jvel) + '|' +
-               "{:9.4f}".format(Jmass) + '|' +
-               "{:9.4f}".format(Jsmooth) + '|' +
-               "{:9.4f}".format(Jbackground) + '|' +
-               "{:9.4f}".format(Jvorticity) + '|' +
-               "{:9.4f}".format(Jmod) + '|' +
-               "{:9.4f}".format(Jpoint)) + '|' +
-               "{:9.4f}".format(np.ma.max(np.ma.abs(winds[2]))))
-
-    return Jvel + Jmass + Jsmooth + Jbackground + Jvorticity + Jmod + Jpoint
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0], parameters.grid_shape[1],
+                        parameters.grid_shape[2]))
 
 
-def grad_J(winds, parameters):
+    div = calculate_mass_continuity(
+        winds[0], winds[1], winds[2], parameters.z,
+        parameters.dx, parameters.dy, parameters.dz)
+
+    div = parameters.Cm*div
+
+    grad_u = -np.gradient(div,parameters.dx,axis=2)
+    grad_v = -np.gradient(div,parameters.dy,axis=1)
+    grad_w = -np.gradient(div,parameters.dz,axis=0)
+    
+    #filter_window = 9
+    #filter_order = 3
+    #grad_u = savgol_filter(grad_u, filter_window, filter_order, axis=0)
+    #grad_u = savgol_filter(grad_u, filter_window, filter_order, axis=1)
+    #grad_u = savgol_filter(grad_u, filter_window, filter_order, axis=2)
+    #grad_v = savgol_filter(grad_v, filter_window, filter_order, axis=0)
+    #grad_v = savgol_filter(grad_v, filter_window, filter_order, axis=1)
+    #grad_v = savgol_filter(grad_v, filter_window, filter_order, axis=2)
+    #grad_w = savgol_filter(grad_w, filter_window, filter_order, axis=0)
+    #grad_w = savgol_filter(grad_w, filter_window, filter_order, axis=1)
+    #grad_w = savgol_filter(grad_w, filter_window, filter_order, axis=2)
+
+    mult = np.reshape(mult, (parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
+    
+    al = -np.sum(mult*div) + (mu/2.0)*np.sum(div**2)
+    
+    # Impermeability condition (commenting because this should be enforced in bound constraints)
+    #grad_w[0, :, :] = 0
+    #if(parameters.upper_bc is True):
+    #    grad_w[-1, :, :] = 0
+    
+    al_grad = np.stack([(mu - mult)*grad_u, (mu - mult)*grad_v, (mu - mult)*grad_w], axis=0)
+
+    return al, al_grad.flatten()
+
+def smooth_cost_function(winds, parameters, grad, pos):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0], parameters.grid_shape[1],
+                        parameters.grid_shape[2]))
+
+    Jsmooth = calculate_smoothness_cost(
+        winds[0], winds[1], winds[2], Cx=1.0 ,Cy=1.0, Cz=1.0)
+    
+    if grad.size > 0:
+        grad = grad_smooth_cost(winds, parameters)
+
+    if not pos:
+        Jsmooth = -1.0*Jsmooth
+        grad = -1.0*grad
+
+    return Jsmooth - sum(parameters.Cx + parameters.Cy + parameters.Cz)
+
+def background_cost_function(winds, parameters, grad, pos):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0], parameters.grid_shape[1],
+                        parameters.grid_shape[2]))
+
+    Jbackground = calculate_background_cost(
+        winds[0], winds[1], winds[2], parameters.bg_weights,
+        parameters.u_back, parameters.v_back, 1.0)
+    if grad.size > 0:
+        grad = grad_background_cost(winds, parameters)
+
+    if not pos:
+        Jbackground = -1.0*Jbackground
+        grad = -1.0*grad
+
+    return Jbackground - parameters.Cb        
+
+def vertical_vorticity_cost_function(winds, parameters, grad, pos):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0], parameters.grid_shape[1],
+                        parameters.grid_shape[2]))
+
+    Jvorticity = calculate_vertical_vorticity_cost(
+        winds[0], winds[1], winds[2], parameters.dx,
+        parameters.dy, parameters.dz, parameters.Ut,
+        parameters.Vt, coeff=1.0)
+    if grad.size > 0:
+        grad = grad_vertical_vorticity_cost(winds, parameters)
+
+    if not pos:
+        Jvorticity = -1.0*Jvorticity
+        grad = -1.0*grad
+
+    return Jvorticity - parameters.Cv
+
+def model_cost_function(winds, parameters, grad, pos):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0], parameters.grid_shape[1],
+                        parameters.grid_shape[2]))
+
+    Jmod = calculate_model_cost(
+        winds[0], winds[1], winds[2],
+        parameters.model_weights, parameters.u_model,
+        parameters.v_model,
+        parameters.w_model, coeff=1.0)
+
+    if grad.size > 0:
+        grad = grad_model_cost(winds, parameters)
+
+    if not pos:
+        Jmod = -1.0*Jmod
+        grad = -1.0*grad
+
+    return Jmod - parameters.Cmod
+
+def point_cost_function(winds, parameters, grad, pos):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0], parameters.grid_shape[1],
+                        parameters.grid_shape[2]))
+
+    Jpoint = calculate_point_cost(
+        winds[0], winds[1], parameters.x, parameters.y, parameters.z,
+        parameters.point_list, Cp=1.0, roi=parameters.roi)
+    if grad.size > 0:
+        grad = grad_point_cost(winds, parameters)
+
+    if not pos:
+        Jpoint = -1.0*Jpoint
+        grad = -1.0*grad
+
+    return Jpoint - parameters.Cpoint
+
+def grad_radial_velocity(winds, parameters):
     """
     Calculates the gradient of the cost function. This typically does not need
     to be called directly as get_dd_wind_field is a wrapper around this
@@ -124,42 +203,80 @@ def grad_J(winds, parameters):
         winds[0], winds[1], winds[2], parameters.wts, parameters.weights,
         parameters.rmsVr, coeff=parameters.Co, upper_bc=parameters.upper_bc)
 
-    if(parameters.Cm > 0):
-        grad += calculate_mass_continuity_gradient(
-            winds[0], winds[1], winds[2], parameters.z,
-            parameters.dx, parameters.dy, parameters.dz,
-            coeff=parameters.Cm, upper_bc=parameters.upper_bc)
+    return grad
 
-    if(parameters.Cx > 0 or parameters.Cy > 0 or parameters.Cz > 0):
-        grad += calculate_smoothness_gradient(
-            winds[0], winds[1], winds[2], Cx=parameters.Cx,
-            Cy=parameters.Cy, Cz=parameters.Cz, upper_bc=parameters.upper_bc)
+def grad_mass_cont(winds, parameters):
 
-    if(parameters.Cb > 0):
-        grad += calculate_background_gradient(
-            winds[0], winds[1], winds[2], parameters.bg_weights,
-            parameters.u_back, parameters.v_back, parameters.Cb,
-            upper_bc=parameters.upper_bc)
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0],
+                        parameters.grid_shape[1], parameters.grid_shape[2]))
 
-    if(parameters.Cv > 0):
-        grad += calculate_vertical_vorticity_gradient(
-            winds[0], winds[1], winds[2], parameters.dx,
-            parameters.dy, parameters.dz, parameters.Ut,
-            parameters.Vt, coeff=parameters.Cv)
+    grad = calculate_mass_continuity_gradient(
+        winds[0], winds[1], winds[2], parameters.z,
+        parameters.dx, parameters.dy, parameters.dz, upper_bc=parameters.upper_bc, coeff=1.0)
 
-    if(parameters.Cmod > 0):
-        grad += calculate_model_gradient(
-            winds[0], winds[1], winds[2],
-            parameters.model_weights, parameters.u_model, parameters.v_model,
-            parameters.w_model, coeff=parameters.Cmod)
+    return grad
 
-    if parameters.Cpoint > 0:
-        grad += calculate_point_gradient(
-            winds[0], winds[1], parameters.x, parameters.y, parameters.z,
-            parameters.point_list, Cp=parameters.Cpoint, roi=parameters.roi)
+def grad_smooth_cost(winds, parameters):
 
-    if(parameters.print_out is True):
-        print('Norm of gradient: ' + str(np.linalg.norm(grad, np.inf)))
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0],
+                        parameters.grid_shape[1], parameters.grid_shape[2]))
+
+    grad = calculate_smoothness_gradient(
+        winds[0], winds[1], winds[2], Cx=parameters.Cx,
+        Cy=parameters.Cy, Cz=parameters.Cz, upper_bc=parameters.upper_bc)
+
+    return grad
+
+def grad_background_cost(winds, parameters):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0],
+                        parameters.grid_shape[1], parameters.grid_shape[2]))
+
+    grad = calculate_background_gradient(
+        winds[0], winds[1], winds[2], parameters.bg_weights,
+        parameters.u_back, parameters.v_back, parameters.Cb,
+        upper_bc=parameters.upper_bc)
+
+    return grad
+
+def grad_vertical_vorticity_cost(winds, parameters):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0],
+                        parameters.grid_shape[1], parameters.grid_shape[2]))
+
+    grad = calculate_vertical_vorticity_gradient(
+        winds[0], winds[1], winds[2], parameters.dx,
+        parameters.dy, parameters.dz, parameters.Ut,
+        parameters.Vt, coeff=parameters.Cv)
+
+    return grad
+
+def grad_model_cost(winds, parameters):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0],
+                        parameters.grid_shape[1], parameters.grid_shape[2]))
+
+    grad = calculate_model_gradient(
+        winds[0], winds[1], winds[2],
+        parameters.model_weights, parameters.u_model, parameters.v_model,
+        parameters.w_model, coeff=parameters.Cmod)
+
+    return grad
+
+def grad_point_cost(winds, parameters):
+
+    winds = np.reshape(winds,
+                       (3, parameters.grid_shape[0],
+                        parameters.grid_shape[1], parameters.grid_shape[2]))
+
+    grad = calculate_point_gradient(
+        winds[0], winds[1], parameters.x, parameters.y, parameters.z,
+        parameters.point_list, Cp=parameters.Cpoint, roi=parameters.roi)
 
     return grad
 
@@ -321,9 +438,9 @@ def calculate_grad_radial_vel(vrs, els, azs, u, v, w,
         p_z1 += z_grad
 
     # Impermeability condition
-    p_z1[0, :, :] = 0
-    if(upper_bc is True):
-        p_z1[-1, :, :] = 0
+    #p_z1[0, :, :] = 0
+    #if(upper_bc is True):
+    #    p_z1[-1, :, :] = 0
     y = np.stack((p_x1, p_y1, p_z1), axis=0)
     return y.flatten()
 
@@ -548,17 +665,34 @@ def calculate_mass_continuity(u, v, w, z, dx, dy, dz, coeff=1500.0, anel=1):
     J: float
         value of mass continuity cost function
     """
-    dudx = np.gradient(u, dx, axis=2)
-    dvdy = np.gradient(v, dy, axis=1)
-    dwdz = np.gradient(w, dz, axis=0)
+    dudx = np.gradient(u, dx,axis=2)
+    dvdy = np.gradient(v, dy,axis=1)
+    dwdz = np.gradient(w, dz,axis=0)
 
+    #filter_window = 9
+    #filter_order = 3
+    #dudx = savgol_filter(dudx, filter_window, filter_order, axis=0)
+    #dudx = savgol_filter(dudx, filter_window, filter_order, axis=1)
+    #dudx = savgol_filter(dudx, filter_window, filter_order, axis=2)
+    #dvdy = savgol_filter(dvdy, filter_window, filter_order, axis=0)
+    #dvdy = savgol_filter(dvdy, filter_window, filter_order, axis=1)
+    #dvdy = savgol_filter(dvdy, filter_window, filter_order, axis=2)
+    #dwdz = savgol_filter(dwdz, filter_window, filter_order, axis=0)
+    #dwdz = savgol_filter(dwdz, filter_window, filter_order, axis=1)
+    #dwdz = savgol_filter(dwdz, filter_window, filter_order, axis=2)
     if(anel == 1):
         rho = np.exp(-z/10000.0)
-        drho_dz = np.gradient(rho, dz, axis=0)
+        drho_dz = np.gradient(rho,dz,axis=0)
         anel_term = w/rho*drho_dz
+        #anel_term = savgol_filter(anel_term, filter_window, filter_order, axis=0)
+        #anel_term = savgol_filter(anel_term, filter_window, filter_order, axis=1)
+        #anel_term = savgol_filter(anel_term, filter_window, filter_order, axis=2)
+
     else:
         anel_term = np.zeros(w.shape)
-    return coeff*np.sum(np.square(dudx + dvdy + dwdz + anel_term))/2.0
+    div = dudx + dvdy + dwdz + anel_term
+
+    return div
 
 
 def calculate_mass_continuity_gradient(u, v, w, z, dx,

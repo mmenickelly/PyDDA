@@ -77,6 +77,13 @@ procedures in Python, they then need to be added to
 """
 
 
+from .cost_functions import radial_velocity_function, grad_radial_velocity
+from .cost_functions import al_mass_cont_function, grad_mass_cont
+from .cost_functions import smooth_cost_function, grad_smooth_cost
+from .cost_functions import background_cost_function, grad_background_cost
+from .cost_functions import vertical_vorticity_cost_function, grad_vertical_vorticity_cost
+from .cost_functions import model_cost_function, grad_model_cost
+from .cost_functions import point_cost_function, grad_point_cost
 from .cost_functions import calculate_radial_vel_cost_function
 from .cost_functions import calculate_fall_speed
 from .cost_functions import calculate_grad_radial_vel
@@ -91,4 +98,3 @@ from .cost_functions import calculate_vertical_vorticity_gradient
 from .cost_functions import calculate_model_cost
 from .cost_functions import calculate_model_gradient
 from .cost_functions import calculate_point_cost, calculate_point_gradient
-from .cost_functions import J_function, grad_J
