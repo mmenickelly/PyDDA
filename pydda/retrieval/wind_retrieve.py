@@ -9,10 +9,12 @@ import numpy as np
 import time
 import cartopy.crs as ccrs
 import math
+import nlopt
 
 from .. import cost_functions
-from ..cost_functions import J_function, grad_J
-from scipy.optimize import fmin_l_bfgs_b
+from ..cost_functions import *
+from .auglag import auglag
+
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 from matplotlib import pyplot as plt
@@ -67,6 +69,12 @@ class DDParameters(object):
         Coefficient for model constraint
     Cpoint: float
         Coefficient for point constraint
+    cvtol : float
+        Maximum divergence constraint violation
+    gtol: float
+        Tolerance on gradient of AL norm
+    Jveltol: float
+        Maximum value of allowable Jvel term
     Ut: float
         Prescribed storm motion. This is only needed if Cv is not zero.
     Vt: float
@@ -100,6 +108,10 @@ class DDParameters(object):
         to correspond to each component of the wind field and "x", "y", "z"
         to correspond to the location of the point observation in the Grid's
         Cartesian coordinates.
+    roi: float
+    roi: float
+    roi: float
+    roi: float
     roi: float
         The radius of influence of each point observation in m.
     upper_bc: bool
@@ -146,12 +158,16 @@ class DDParameters(object):
         self.roi = 1000.0
         self.frz = 4500.0
         self.point_list = []
+        self.cvtol = 1e-2
+        self.gtol = 1e-2
+        self.Jveltol = 100.0
 
 
 def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
                       refl_field=None, u_back=None, v_back=None, z_back=None,
                       frz=4500.0, Co=1.0, Cm=1500.0, Cx=0.0,
                       Cy=0.0, Cz=0.0, Cb=0.0, Cv=0.0, Cmod=0.0, Cpoint=0.0,
+                      cvtol = 1e-2, gtol = 1e-2, Jveltol = 100.0,
                       Ut=None, Vt=None, filt_iterations=2,
                       mask_outside_opt=False, weights_obs=None,
                       weights_model=None, weights_bg=None,
@@ -306,6 +322,11 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     parameters = DDParameters()
     parameters.Ut = Ut
     parameters.Vt = Vt
+
+    # for the AL method
+    parameters.gtol = gtol
+    parameters.cvtol = cvtol
+    parameters.Jveltol = Jveltol
     
     # Ensure that all Grids are on the same coordinate system
     prev_grid = Grids[0]
@@ -398,7 +419,6 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
                                     Grids[i].point_x['data'][0],
                                     Grids[i].point_y['data'][0],
                                     Grids[i].get_projparams())
-
                 for k in range(parameters.vrs[i].shape[0]):
                     if(weights_obs is None):
                         cur_array = parameters.weights[i, k]
@@ -467,8 +487,6 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     parameters.grid_shape = u_init.shape
     # Parse names of velocity field
 
-    winds = winds.flatten()
-
     print("Starting solver ")
     parameters.dx = np.diff(Grids[0].x['data'], axis=0)[0]
     parameters.dy = np.diff(Grids[0].y['data'], axis=0)[0]
@@ -479,12 +497,6 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     parameters.x = Grids[0].point_x['data']
     parameters.y = Grids[0].point_y['data']
     bt = time.time()
-
-    # First pass - no filter
-    wprevmax = 99
-    wcurrmax = w_init.max()
-    iterations = 0
-    bounds = [(-x, x) for x in 100*np.ones(winds.shape)]
 
     if(model_fields is not None):
         for the_field in model_fields:
@@ -508,25 +520,16 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     parameters.upper_bc = upper_bc
     parameters.points = points
     parameters.point_list = points
+ 
+    # Impermeability condition (check this!) 
+    mask = np.ones(winds.shape)
+    mask[2,-1,:,:] = 0
+    mask[2,0,:,:] = 0
+    winds = winds.flatten()
+    bounds = [(-x,x) for x in 100*np.ones(winds.shape)*mask.flatten()]
+    #bounds = [(-x,x) for x in 100*np.ones(winds.shape)]
 
-    while(iterations < max_iterations and
-          (abs(wprevmax-wcurrmax) > 0.02)):
-        wprevmax = wcurrmax
-        parameters.print_out = False
-        winds = fmin_l_bfgs_b(J_function, winds, args=(parameters,),
-                              maxiter=10, pgtol=1e-3, bounds=bounds,
-                              fprime=grad_J, disp=0, iprint=-1)
-        parameters.print_out = True
-        if output_cost_functions is True:
-            J_function(winds[0], parameters)
-            grad_J(winds[0], parameters)
-        winds = np.reshape(
-            winds[0], (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
-        iterations = iterations+10
-        print('Iterations before filter: ' + str(iterations))
-        wcurrmax = winds[2].max()
-        winds = np.stack([winds[0], winds[1], winds[2]])
-        winds = winds.flatten()
+    winds, mult = auglag(winds,parameters,bounds)
 
     if filt_iterations > 0:
         print('Applying low pass filter to wind field...')
@@ -545,13 +548,11 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
         winds = winds.flatten()
         iterations = 0
         while(iterations < filt_iterations):
-            winds = fmin_l_bfgs_b(
-                J_function, winds, args=(parameters,),
-                maxiter=10, pgtol=1e-3, bounds=bounds,
-                fprime=grad_J, disp=0, iprint=-1)
-            parameters.print_out = False
+            #winds = opt.optimize(winds)
+            #parameters.print_out = False
+            winds, mult = auglag(winds,parameters,bounds)
             winds = np.reshape(
-                winds[0], (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
+                winds, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
             iterations = iterations+1
             print('Iterations after filter: ' + str(iterations))
             winds = np.stack([winds[0], winds[1], winds[2]])
@@ -566,7 +567,7 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     v = the_winds[1]
     w = the_winds[2]
     where_mask = np.sum(parameters.weights, axis=0) + \
-                 np.sum(parameters.model_weights, axis=0)
+            np.sum(parameters.model_weights, axis=0)
     
     u = np.ma.array(u)
     w = np.ma.array(w)
