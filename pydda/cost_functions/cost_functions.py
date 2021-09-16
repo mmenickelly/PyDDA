@@ -42,41 +42,78 @@ def al_mass_cont_function(winds, parameters, mult, mu):
 
     winds = np.reshape(winds,
                        (3, parameters.grid_shape[0], parameters.grid_shape[1],
-                        parameters.grid_shape[2]))
+                                              parameters.grid_shape[2]))
 
 
     div = calculate_mass_continuity(
         winds[0], winds[1], winds[2], parameters.z,
         parameters.dx, parameters.dy, parameters.dz)
-
-    div = parameters.Cm*div
-
-    grad_u = -np.gradient(div,parameters.dx,axis=2)
-    grad_v = -np.gradient(div,parameters.dy,axis=1)
-    grad_w = -np.gradient(div,parameters.dz,axis=0)
-    
-    #filter_window = 9
-    #filter_order = 3
-    #grad_u = savgol_filter(grad_u, filter_window, filter_order, axis=0)
-    #grad_u = savgol_filter(grad_u, filter_window, filter_order, axis=1)
-    #grad_u = savgol_filter(grad_u, filter_window, filter_order, axis=2)
-    #grad_v = savgol_filter(grad_v, filter_window, filter_order, axis=0)
-    #grad_v = savgol_filter(grad_v, filter_window, filter_order, axis=1)
-    #grad_v = savgol_filter(grad_v, filter_window, filter_order, axis=2)
-    #grad_w = savgol_filter(grad_w, filter_window, filter_order, axis=0)
-    #grad_w = savgol_filter(grad_w, filter_window, filter_order, axis=1)
-    #grad_w = savgol_filter(grad_w, filter_window, filter_order, axis=2)
-
+   
     mult = np.reshape(mult, (parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
+   
+    rho = np.exp(-parameters.z/10000.0)
+    drho_dz = np.gradient(rho, parameters.dz, axis = 0)
+    anel_coeffs = drho_dz/rho
     
+    coeffs = mu*div-1.0*mult
+    grad_w = -np.gradient(coeffs,parameters.dz,axis=0)
+    grad_w[0,:,:] += ((-2.0/parameters.dz)*coeffs[0,:,:] + (0.5/parameters.dz)*coeffs[1,:,:])
+    grad_w[1,:,:] += (0.5/parameters.dz)*coeffs[0,:,:]
+    grad_w[-2,:,:] += (0.5/parameters.dz)*coeffs[-1,:,:]
+    grad_w[-1,:,:] += ((-0.5/parameters.dz)*coeffs[-2,:,:] + (2/parameters.dz)*coeffs[-1,:,:])
+    grad_w += coeffs*anel_coeffs
+    grad_v = -np.gradient(coeffs,parameters.dy,axis=1)
+    grad_v[:,0,:] += ((-2.0/parameters.dy)*coeffs[:,0,:] + (0.5/parameters.dy)*coeffs[:,1,:])
+    grad_v[:,1,:] += (0.5/parameters.dy)*coeffs[:,0,:]
+    grad_v[:,-2,:] += (0.5/parameters.dy)*coeffs[:,-1,:]
+    grad_v[:,-1,:] += ((-0.5/parameters.dy)*coeffs[:,-2,:] + (2/parameters.dy)*coeffs[:,-1,:])
+    grad_u = -np.gradient(coeffs,parameters.dx,axis=2)
+    grad_u[:,:,0] += ((-2.0/parameters.dx)*coeffs[:,:,0] + (0.5/parameters.dx)*coeffs[:,:,1])
+    grad_u[:,:,1] += (0.5/parameters.dx)*coeffs[:,:,0]
+    grad_u[:,:,-2] += (0.5/parameters.dx)*coeffs[:,:,-1]
+    grad_u[:,:,-1] += ((-0.5/parameters.dx)*coeffs[:,:,-2] + (2/parameters.dx)*coeffs[:,:,-1])
+    
+    ## NASTY TRIPLE LOOP (FIGURE OUT HOW TO SIMPLIFY LATER)
+    #grad_u = np.zeros(np.shape(div))
+    #grad_v = np.zeros(np.shape(div))
+    #grad_w = np.zeros(np.shape(div))
+    #
+    #for i in range(parameters.grid_shape[0]):
+    #    for j in range(parameters.grid_shape[1]):
+    #        for k in range(parameters.grid_shape[2]):
+    #            coeff = mu*div[i,j,k]-1.0*mult[i,j,k]
+    #            if i == 0:
+    #                grad_w[0,j,k] += -1.0*coeff/parameters.dz
+    #                grad_w[1,j,k] += coeff/parameters.dz
+    #            elif i == parameters.grid_shape[0]-1:
+    #                grad_w[i,j,k] += coeff/parameters.dz
+    #                grad_w[i-1,j,k] += -1.0*coeff/parameters.dz
+    #            else:
+    #                grad_w[i-1,j,k] += -0.5*coeff/parameters.dz
+    #                grad_w[i+1,j,k] += 0.5*coeff/parameters.dz
+    #            grad_w[i,j,k] += coeff*anel_coeffs[i,j,k]
+    #            if j == 0:
+    #                grad_v[i,0,k] += -1.0*coeff/parameters.dy
+    #                grad_v[i,1,k] += coeff/parameters.dy
+    #            elif j == parameters.grid_shape[1]-1:
+    #                grad_v[i,j,k] += coeff/parameters.dy
+    #                grad_v[i,j-1,k] += -1.0*coeff/parameters.dy
+    #            else:
+    #                grad_v[i,j-1,k] += -0.5*coeff/parameters.dy
+    #                grad_v[i,j+1,k] += 0.5*coeff/parameters.dy
+    #            if k == 0:
+    #                grad_u[i,j,0] += -1.0*coeff/parameters.dx
+    #                grad_u[i,j,1] += coeff/parameters.dx
+    #            elif k == parameters.grid_shape[2]-1:
+    #                grad_u[i,j,k] += coeff/parameters.dx
+    #                grad_u[i,j,k-1] += -1.0*coeff/parameters.dx
+    #            else:
+    #                grad_u[i,j,k-1] += -0.5*coeff/parameters.dx
+    #                grad_u[i,j,k+1] += 0.5*coeff/parameters.dx
+
     al = -np.sum(mult*div) + (mu/2.0)*np.sum(div**2)
     
-    # Impermeability condition (commenting because this should be enforced in bound constraints)
-    #grad_w[0, :, :] = 0
-    #if(parameters.upper_bc is True):
-    #    grad_w[-1, :, :] = 0
-    
-    al_grad = np.stack([(mu - mult)*grad_u, (mu - mult)*grad_v, (mu - mult)*grad_w], axis=0)
+    al_grad = np.stack([grad_u, grad_v, grad_w], axis=0)
 
     return al, al_grad.flatten()
 
@@ -438,9 +475,9 @@ def calculate_grad_radial_vel(vrs, els, azs, u, v, w,
         p_z1 += z_grad
 
     # Impermeability condition
-    #p_z1[0, :, :] = 0
-    #if(upper_bc is True):
-    #    p_z1[-1, :, :] = 0
+    p_z1[0, :, :] = 0
+    if(upper_bc is True):
+        p_z1[-1, :, :] = 0
     y = np.stack((p_x1, p_y1, p_z1), axis=0)
     return y.flatten()
 
@@ -669,25 +706,10 @@ def calculate_mass_continuity(u, v, w, z, dx, dy, dz, coeff=1500.0, anel=1):
     dvdy = np.gradient(v, dy,axis=1)
     dwdz = np.gradient(w, dz,axis=0)
 
-    #filter_window = 9
-    #filter_order = 3
-    #dudx = savgol_filter(dudx, filter_window, filter_order, axis=0)
-    #dudx = savgol_filter(dudx, filter_window, filter_order, axis=1)
-    #dudx = savgol_filter(dudx, filter_window, filter_order, axis=2)
-    #dvdy = savgol_filter(dvdy, filter_window, filter_order, axis=0)
-    #dvdy = savgol_filter(dvdy, filter_window, filter_order, axis=1)
-    #dvdy = savgol_filter(dvdy, filter_window, filter_order, axis=2)
-    #dwdz = savgol_filter(dwdz, filter_window, filter_order, axis=0)
-    #dwdz = savgol_filter(dwdz, filter_window, filter_order, axis=1)
-    #dwdz = savgol_filter(dwdz, filter_window, filter_order, axis=2)
     if(anel == 1):
         rho = np.exp(-z/10000.0)
         drho_dz = np.gradient(rho,dz,axis=0)
         anel_term = w/rho*drho_dz
-        #anel_term = savgol_filter(anel_term, filter_window, filter_order, axis=0)
-        #anel_term = savgol_filter(anel_term, filter_window, filter_order, axis=1)
-        #anel_term = savgol_filter(anel_term, filter_window, filter_order, axis=2)
-
     else:
         anel_term = np.zeros(w.shape)
     div = dudx + dvdy + dwdz + anel_term
@@ -740,16 +762,16 @@ def calculate_mass_continuity_gradient(u, v, w, z, dx,
     else:
         anel_term = 0
 
-    div2 = dudx + dvdy + dwdz + anel_term
+    div = dudx + dvdy + dwdz + anel_term
 
-    grad_u = -np.gradient(div2, dx, axis=2)*coeff
-    grad_v = -np.gradient(div2, dy, axis=1)*coeff
-    grad_w = -np.gradient(div2, dz, axis=0)*coeff
+    grad_u = -np.gradient(div, dx, axis=2)*coeff
+    grad_v = -np.gradient(div, dy, axis=1)*coeff
+    grad_w = -np.gradient(div, dz, axis=0)*coeff
 
     # Impermeability condition
-    grad_w[0, :, :] = 0
-    if(upper_bc is True):
-        grad_w[-1, :, :] = 0
+    #grad_w[0, :, :] = 0
+    #if(upper_bc is True):
+    #    grad_w[-1, :, :] = 0
     y = np.stack([grad_u, grad_v, grad_w], axis=0)
     return y.flatten()
 

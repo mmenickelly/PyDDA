@@ -9,7 +9,7 @@ import numpy as np
 import time
 import cartopy.crs as ccrs
 import math
-import nlopt
+import pickle
 
 from .. import cost_functions
 from ..cost_functions import *
@@ -165,10 +165,10 @@ class DDParameters(object):
 
 def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
                       refl_field=None, u_back=None, v_back=None, z_back=None,
-                      frz=4500.0, Co=1.0, Cm=1500.0, Cx=0.0,
+                      frz=4500.0, Co=1.0, Cm=1.0, Cx=0.0,
                       Cy=0.0, Cz=0.0, Cb=0.0, Cv=0.0, Cmod=0.0, Cpoint=0.0,
                       cvtol = 1e-2, gtol = 1e-2, Jveltol = 100.0,
-                      Ut=None, Vt=None, filt_iterations=2,
+                      Ut=None, Vt=None, filt_iterations=0,
                       mask_outside_opt=False, weights_obs=None,
                       weights_model=None, weights_bg=None,
                       max_iterations=200, mask_w_outside_opt=True,
@@ -527,9 +527,11 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     mask[2,0,:,:] = 0
     winds = winds.flatten()
     bounds = [(-x,x) for x in 100*np.ones(winds.shape)*mask.flatten()]
-    #bounds = [(-x,x) for x in 100*np.ones(winds.shape)]
 
-    winds, mult = auglag(winds,parameters,bounds)
+    winds, mult, AL_Filter = auglag(winds,parameters,bounds)
+
+    file_filter = open("filter.obj","wb")
+    pickle.dump(AL_Filter, file_filter)
 
     if filt_iterations > 0:
         print('Applying low pass filter to wind field...')
