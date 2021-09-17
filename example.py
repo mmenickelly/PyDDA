@@ -18,7 +18,7 @@ u_init, v_init, w_init = pydda.initialization.make_wind_field_from_profile(
 # and data weighting constraints.
 Grids = pydda.retrieval.get_dd_wind_field([berr_grid, cpol_grid], u_init,
                                           v_init, w_init, Co=1.0, Cm=1500.0, Cb = 0.0,
-                                          gtol = 1e-2, cvtol = 1e-3, Jveltol = 100.0,
+                                          gtol = 1e-3, cvtol = 1e-3, Jveltol = 100.0,
                                           Cz=0,
                                           frz=5000.0, filt_iterations=0,
                                           mask_outside_opt=True, upper_bc=True)
