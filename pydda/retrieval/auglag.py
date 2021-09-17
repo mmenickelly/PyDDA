@@ -120,7 +120,7 @@ class RestoCallback:
         self.cv = cv
         self.g = g
         self.al = alnew
-        if self.AL_Filter.check_acceptable(cv,g):
+        if self.AL_Filter.check_acceptable(cv,g):#cv <= self.AL_Filter.beta*self.AL_Filter.cv_min:
             self.winds = xk
             raise StopOptimizingException()
             return True
@@ -165,7 +165,9 @@ def auglag(winds,parameters,bounds):
     print("Initial Lagrangian norm: ", "{:.6f}".format(g))
     Jvel, Jvelgrad = radial_velocity_function(winds, parameters)
     AL_Filter = Filter(winds,cv0,g,Jvel)
-  
+    
+    multk = mult
+
     iter_count = 1
     while True:
         while True:
@@ -180,7 +182,7 @@ def auglag(winds,parameters,bounds):
             try:
                 if iter_count > 1:
                     cb = Callback(al_mu,g_mu,cv,Jvel,AL_Filter,obj_func,obj_func_zero,parameters)
-                    winds = fmin_l_bfgs_b(obj_func, winds, args=(parameters,), pgtol = gtol, bounds=bounds, approx_grad=False, disp=1,iprint=-1)
+                    winds = fmin_l_bfgs_b(obj_func, winds, args=(parameters,), pgtol = gtol, maxiter=100, bounds=bounds, approx_grad=False, disp=1,iprint=-1)
                     # IF WE CHOOSE NOT TO ACTUALLY USE THE CALLBACK ABOVE:
                     alnew, al_grad = obj_func(winds[0],parameters)
                     al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
@@ -243,8 +245,9 @@ def auglag(winds,parameters,bounds):
                 except:
                     print("Can't make progress in restoration, ending prematurely")
                     return winds, mult
-            # update multipliers
-            mult = mult - mu*div
+            else:
+                # update multipliers
+                mult = multk - mu*div
         
             # print some progress stats
             Jvel, Jvelgrad = radial_velocity_function(winds, parameters)
@@ -276,6 +279,8 @@ def auglag(winds,parameters,bounds):
         # add newest point to filter
         AL_Filter.add_to_filter(winds.flatten(),cv,g,Jvel)
         print("Added most recent point to filter")
+        multk = mult
+
     return winds, mult, AL_Filter
 
 
