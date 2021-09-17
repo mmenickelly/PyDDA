@@ -34,7 +34,7 @@ def auglag_function(winds,parameters,mult,mu,resto):
     return al, al_grad
 
 class Filter:
-    def __init__(self, winds, cv0, g0, Jvel0, beta = 0.99, gamma = 0.99):
+    def __init__(self, winds, cv0, g0, Jvel0, beta = 0.9, gamma = 0.9):
         self.cvs = np.array([cv0])
         self.gs = np.array([g0])
         self.Jvels = np.array([Jvel0])
@@ -49,8 +49,9 @@ class Filter:
         self.gs = np.append(self.gs,g)
         self.sols = np.vstack((self.sols,winds))
         self.Jvels = np.append(self.Jvels,Jvel)
-        if g < self.g_min or self.cv_min == 0:
+        if g < self.g_min:
             self.g_min = g
+        if self.cv_min == 0 or cv < self.cv_min:
             self.cv_min = cv
 
     def check_acceptable(self, cv, g):
@@ -64,23 +65,27 @@ class StopOptimizingException(Exception):
     pass
 
 class Callback:
-    def __init__(self, al, g, AL_Filter, obj_func, obj_func_zero, parameters,theta = 0.5):
+    def __init__(self, al, g, cv0, Jvel, AL_Filter, obj_func, obj_func_zero, parameters,theta = 30.0):
         self.obj_func = obj_func
         self.obj_func_zero = obj_func_zero
         self.AL_Filter = AL_Filter
         self.parameters = parameters
-        self.al = al
-        self.g = g
+        self.cv0 = cv0
         self.gnew = g
         self.alnew = al
         self.g_mu = -1
+        self.g0 = g
+        self.Jvel0 = Jvel
         self.theta = theta
+        self.target = al - theta*g
+
     def __call__(self,xk):
         alnew, al_grad = self.obj_func(xk,self.parameters)
         al_grad = np.reshape(al_grad, (3, self.parameters.grid_shape[0], self.parameters.grid_shape[1], self.parameters.grid_shape[2]))
         al_grad[2,-1,:,:] = 0
         al_grad[2,0,:,:] = 0
         gnew = np.linalg.norm(al_grad.flatten())
+        infnorm = np.linalg.norm(al_grad.flatten(),np.Inf)
         self.g_mu = gnew
         self.alnew = alnew
         alnewzero, al_grad_zero = self.obj_func_zero(xk,self.parameters)
@@ -91,7 +96,7 @@ class Callback:
         winds = np.reshape(xk, (3, self.parameters.grid_shape[0], self.parameters.grid_shape[1], self.parameters.grid_shape[2]))
         div = calculate_mass_continuity(winds[0],winds[1],winds[2],self.parameters.z,self.parameters.dx,self.parameters.dy,self.parameters.dz)
         cv = np.linalg.norm(div.flatten())
-        if (alnew <= self.al - self.theta*self.g and np.linalg.norm(al_grad.flatten(),np.Inf) <= self.parameters.gtol) or (alnew <= 0):# and self.AL_Filter.check_acceptable(cv,self.gnew)):
+        if (alnew <= self.target):
             self.winds = xk
             self.alnew = alnew
             self.cv = cv
@@ -145,6 +150,7 @@ def auglag(winds,parameters,bounds):
     winds = winds.flatten()
     
     cv0 = np.linalg.norm(div.flatten())
+    cv = cv0
     print("Initial constraint violation: ", "{:.6f}".format(cv0))
     print("Initial maximum constraint violation: ",np.linalg.norm(div.flatten(),np.Inf))
     
@@ -171,13 +177,23 @@ def auglag(winds,parameters,bounds):
             al_grad[2,0,:,:] = 0
             g_mu = np.linalg.norm(al_grad)
             obj_func_zero = lambda winds, parameters: auglag_function(winds, parameters, mult, 0.0, resto)
-            cb = Callback(al_mu,g,AL_Filter,obj_func,obj_func_zero,parameters)
             try:
                 if iter_count > 1:
-                    cb = Callback(al_mu,g_mu,AL_Filter,obj_func,obj_func_zero,parameters)
-                    winds = fmin_l_bfgs_b(obj_func, winds, args=(parameters,), callback=cb, bounds=bounds, approx_grad=False, disp=1,iprint=-1)
+                    cb = Callback(al_mu,g_mu,cv,Jvel,AL_Filter,obj_func,obj_func_zero,parameters)
+                    winds = fmin_l_bfgs_b(obj_func, winds, args=(parameters,), pgtol = gtol, bounds=bounds, approx_grad=False, disp=1,iprint=-1)
+                    # IF WE CHOOSE NOT TO ACTUALLY USE THE CALLBACK ABOVE:
+                    alnew, al_grad = obj_func(winds[0],parameters)
+                    al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
+                    al_grad[2,-1,:,:] = 0
+                    al_grad[2,0,:,:] = 0
+                    cb.g_mu = np.linalg.norm(al_grad.flatten())
+                    alnew, al_grad = obj_func_zero(winds[0],parameters)
+                    al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
+                    al_grad[2,-1,:,:] = 0
+                    al_grad[2,0,:,:] = 0
+                    cb.gnew = np.linalg.norm(al_grad.flatten())
                 else:
-                    cb = Callback(al_mu,g_mu,AL_Filter,obj_func,obj_func_zero,parameters)
+                    cb = Callback(al_mu,g_mu,cv,Jvel,AL_Filter,obj_func,obj_func_zero,parameters)
                     winds = fmin_l_bfgs_b(obj_func, winds, args=(parameters,), pgtol = gtol, bounds=bounds, approx_grad=False, disp=1,iprint=-1)
                     alnew, al_grad = obj_func(winds[0],parameters)
                     al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
@@ -207,7 +223,7 @@ def auglag(winds,parameters,bounds):
                 div = div.flatten()
                 cv += np.linalg.norm(div)
             # check if restoration is necessary:
-            if AL_Filter.beta*np.maximum(AL_Filter.g_min/AL_Filter.gamma,AL_Filter.beta*AL_Filter.cv_min) <= cv or (g <= gtol and cv >= AL_Filter.beta*AL_Filter.cv_min):
+            if AL_Filter.beta*np.maximum(AL_Filter.g_min/AL_Filter.gamma,AL_Filter.beta*AL_Filter.cv_min) <= cv or (g_mu <= gtol and cv >= AL_Filter.beta*AL_Filter.cv_min):
                 # increase penalty
                 mu = 2.0*mu
                 # run L-BFGS-B to minimize constraint violation
@@ -227,9 +243,8 @@ def auglag(winds,parameters,bounds):
                 except:
                     print("Can't make progress in restoration, ending prematurely")
                     return winds, mult
-            else:
-                # update multipliers
-                mult = mult - mu*div
+            # update multipliers
+            mult = mult - mu*div
         
             # print some progress stats
             Jvel, Jvelgrad = radial_velocity_function(winds, parameters)
@@ -239,9 +254,15 @@ def auglag(winds,parameters,bounds):
             print('Constraint violation: ', cv)
             maxviol = np.linalg.norm(div.flatten(),np.Inf)
             print("Maximum constraint violation: ",maxviol)
-            print("Lagrangian norm: ", "{:.6f}".format(g))
 
             # check if acceptable to filter
+            obj_func_zero = lambda winds, parameters: auglag_function(winds, parameters, mult, 0.0, resto)
+            alnew, al_grad = obj_func_zero(winds.flatten(),parameters)
+            al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
+            al_grad[2,-1,:,:] = 0
+            al_grad[2,0,:,:] = 0
+            g = np.linalg.norm(al_grad.flatten())
+            print("Lagrangian norm: ", "{:.6f}".format(g))
             if AL_Filter.check_acceptable(cv,g) or (maxviol <= cvtol and g <= gtol) or (maxviol <= cvtol and Jvel <= Jveltol):
                 break
 
