@@ -16,12 +16,17 @@ u_init, v_init, w_init = pydda.initialization.make_wind_field_from_profile(
 
 # Start the wind retrieval. This example only uses the mass continuity
 # and data weighting constraints.
-Grids = pydda.retrieval.get_dd_wind_field([berr_grid, cpol_grid], u_init,
+Grids, metrics = pydda.retrieval.get_dd_wind_field([berr_grid, cpol_grid], u_init,
                                           v_init, w_init, Co=1.0, Cm=1500.0, Cb = 0.0,
                                           gtol = 1e-3, cvtol = 1e-3, Jveltol = 100.0,
                                           Cz=0,
                                           frz=5000.0, filt_iterations=0,
-                                          mask_outside_opt=True, upper_bc=True)
+                                          mask_outside_opt=True, upper_bc=True, solver="auglag")
+print("divinf: ",metrics['divinf'])
+print("div2: ",metrics['div2'])
+print("Jvel: ",metrics['Jvel'])
+print("wallclock: ",metrics['wallclock'])
+print("funcalls: ",metrics['funcalls'])
 
 # Plot a horizontal cross section
 plt.figure(figsize=(9, 9))

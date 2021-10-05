@@ -169,6 +169,7 @@ def auglag(winds,parameters,bounds):
     multk = mult
 
     iter_count = 1
+    funcalls = 0
     while True:
         while True:
             # run L-BFGS-B with current fixed values of mult and mu 
@@ -207,7 +208,7 @@ def auglag(winds,parameters,bounds):
                     al_grad[2,-1,:,:] = 0
                     al_grad[2,0,:,:] = 0
                     cb.gnew = np.linalg.norm(al_grad.flatten())
-
+                funcalls += winds[2]['funcalls']
                 winds = np.reshape(winds[0], (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
             except StopOptimizingException:
                 winds = cb.winds
@@ -235,6 +236,7 @@ def auglag(winds,parameters,bounds):
                 resto_cb = RestoCallback(AL_Filter,obj_func,parameters)
                 try:
                     winds = fmin_l_bfgs_b(obj_func_resto, winds, args=(parameters,), pgtol=0, callback=resto_cb, bounds=bounds, approx_grad=False, disp=1,iprint=-1)
+                    funcalls += winds[2]['funcalls']
                     winds = np.reshape(winds[0], (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
                 except StopOptimizingException:
                     winds = resto_cb.winds
@@ -281,7 +283,7 @@ def auglag(winds,parameters,bounds):
         print("Added most recent point to filter")
         multk = mult
 
-    return winds, mult, AL_Filter
+    return winds, mult, AL_Filter, funcalls
 
 
 

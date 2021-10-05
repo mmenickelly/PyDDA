@@ -13,7 +13,8 @@ import pickle
 
 from .. import cost_functions
 from ..cost_functions import *
-from .auglag import auglag
+from .auglag import auglag, auglag_function
+from scipy.optimize import fmin_l_bfgs_b
 
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
@@ -174,7 +175,7 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
                       max_iterations=200, mask_w_outside_opt=True,
                       filter_window=9, filter_order=3, min_bca=30.0,
                       max_bca=150.0, upper_bc=True, model_fields=None,
-                      output_cost_functions=True, roi=1000.0):
+                      output_cost_functions=True, roi=1000.0, solver="auglag"):
     """
     This function takes in a list of Py-ART Grid objects and derives a
     wind field. Every Py-ART Grid in Grids must have the same grid
@@ -507,6 +508,7 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
             parameters.v_model.append(Grids[0].fields[v_field]["data"])
             parameters.w_model.append(Grids[0].fields[w_field]["data"])
 
+    parameters.solver = solver
     parameters.Co = Co
     parameters.Cm = Cm
     parameters.Cx = Cx
@@ -525,14 +527,23 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     mask = np.ones(winds.shape)
     mask[2,-1,:,:] = 0
     mask[2,0,:,:] = 0
+    tempwinds = winds
     winds = winds.flatten()
     bounds = [(-x,x) for x in 100*np.ones(winds.shape)*mask.flatten()]
 
-    winds, mult, AL_Filter = auglag(winds,parameters,bounds)
-
-    file_filter = open("filter.obj","wb")
-    pickle.dump(AL_Filter, file_filter)
-
+    if parameters.solver == "auglag":
+        winds, mult, AL_Filter, funcalls = auglag(winds,parameters,bounds)
+        file_filter = open("filter.obj","wb")
+        pickle.dump(AL_Filter, file_filter)
+        filename = "auglag_winds" + str(parameters.Cm) + ".npz"
+        np.savez(filename,winds=winds)
+    elif parameters.solver == "lbfgs":
+        div = calculate_mass_continuity(tempwinds[0],tempwinds[1],tempwinds[2],parameters.z,parameters.dx,parameters.dy,parameters.dz)
+        J_function = lambda winds, parameters: auglag_function(winds,parameters,np.zeros(div.shape).flatten(),parameters.Cm,False)
+        lbfgs_sol = fmin_l_bfgs_b(J_function, winds, args=(parameters,), disp=1, pgtol=parameters.gtol, bounds=bounds,approx_grad=False)
+        winds = lbfgs_sol[0]
+        funcalls = lbfgs_sol[2]['funcalls']
+    print("Total funcalls: ",funcalls)
     if filt_iterations > 0:
         print('Applying low pass filter to wind field...')
         winds = np.reshape(winds, (3, parameters.grid_shape[0], parameters.grid_shape[1],
@@ -559,8 +570,8 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
             print('Iterations after filter: ' + str(iterations))
             winds = np.stack([winds[0], winds[1], winds[2]])
             winds = winds.flatten()
-
-    print("Done! Time = " + "{:2.1f}".format(time.time() - bt))
+    wallclock = time.time() - bt
+    print("Done! Time = " + "{:2.1f}".format(wallclock))
 
     # First pass - no filter
     the_winds = np.reshape(
@@ -601,6 +612,17 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     w_field['long_name'] = 'vertical component of wind velocity'
     w_field['min_bca'] = min_bca
     w_field['max_bca'] = max_bca
+    
+    # Create a dictionary of optimization metrics
+    metrics = dict()
+    div = calculate_mass_continuity(the_winds[0],the_winds[1],the_winds[2],parameters.z,parameters.dx,parameters.dy,parameters.dz)
+    metrics['divinf'] = np.linalg.norm(div.flatten(),np.Inf)
+    metrics['div2'] = np.linalg.norm(div.flatten())
+    Jvel, Jvelgrad = auglag_function(the_winds.flatten(),parameters,np.zeros(div.shape).flatten(),0,False)
+    metrics['Jvel'] = Jvel
+    metrics['wallclock'] = wallclock
+    metrics['funcalls'] = funcalls
+    
 
     new_grid_list = []
 
@@ -611,7 +633,7 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
         temp_grid.add_field('w', w_field, replace_existing=True)
         new_grid_list.append(temp_grid)
 
-    return new_grid_list
+    return new_grid_list, metrics
 
 
 def get_bca(rad1_lon, rad1_lat, rad2_lon, rad2_lat, x, y, projparams):
