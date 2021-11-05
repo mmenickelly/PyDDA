@@ -163,6 +163,8 @@ class DDParameters(object):
         self.gtol = 1e-2
         self.Jveltol = 100.0
 
+class Multipliers(object):
+    pass
 
 def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
                       refl_field=None, u_back=None, v_back=None, z_back=None,
@@ -615,10 +617,18 @@ def get_dd_wind_field(Grids, u_init, v_init, w_init, points=None, vel_name=None,
     
     # Create a dictionary of optimization metrics
     metrics = dict()
-    div = calculate_mass_continuity(the_winds[0],the_winds[1],the_winds[2],parameters.z,parameters.dx,parameters.dy,parameters.dz)
-    metrics['divinf'] = np.linalg.norm(div.flatten(),np.Inf)
-    metrics['div2'] = np.linalg.norm(div.flatten())
-    Jvel, Jvelgrad = auglag_function(the_winds.flatten(),parameters,np.zeros(div.shape).flatten(),0,False)
+    mult = Multipliers()
+    if parameters.Cm > 0:
+        div = calculate_mass_continuity(the_winds[0],the_winds[1],the_winds[2],parameters.z,parameters.dx,parameters.dy,parameters.dz)
+        metrics['divinf'] = np.linalg.norm(div.flatten(),np.Inf)
+        metrics['div2'] = np.linalg.norm(div.flatten())
+        mult.mass_cont = np.zeros(div.shape).flatten()
+    if parameters.Cv > 0:
+        vort = calculate_vertical_vorticity(the_winds[0],the_winds[1],the_winds[2],parameters.dx,parameters.dy,parameters.dz,parameters.Ut,parameters.Vt)
+        metrics['vortinf'] = np.linalg.norm(vort.flatten(),np.Inf)
+        metrics['vort2'] = np.linalg.norm(vort.flatten())
+        mult.vert_vort = np.zeros(vort.shape).flatten()
+    Jvel, Jvelgrad = auglag_function(the_winds.flatten(),parameters,mult,0,False)
     metrics['Jvel'] = Jvel
     metrics['wallclock'] = wallclock
     metrics['funcalls'] = funcalls

@@ -1,6 +1,7 @@
 from ..cost_functions import *
 import numpy as np
 from scipy.optimize import fmin_l_bfgs_b
+import copy
 
 def auglag_function(winds,parameters,mult,mu,resto):
 
@@ -12,24 +13,22 @@ def auglag_function(winds,parameters,mult,mu,resto):
         al += Jvel
         al_grad += Jvel_grad
 
-    if parameters.Cb > 0 and not resto:
-        winds = np.reshape(winds,(3,parameters.grid_shape[0],parameters.grid_shape[1],parameters.grid_shape[2]))
-        al += calculate_background_cost(
-                winds[0], winds[1], winds[2], parameters.bg_weights,
-                parameters.u_back, parameters.v_back, parameters.Cb)
-        al_grad += calculate_background_gradient(
-            winds[0], winds[1], winds[2], parameters.bg_weights,
-            parameters.u_back, parameters.v_back, parameters.Cb)
-        winds = winds.flatten()
-    
     if resto:
-        mult = np.zeros(mult.shape)
+        if parameters.Cm > 0:
+            mult.mass_cont = np.zeros(mult.mass_cont.shape)
+        if parameters.Cv > 0:
+            mult.vert_vort = np.zeros(mult.vert_vort.shape)
         mu = 1.0
 
     if parameters.Cm > 0:
-        Jmass, Jmass_grad = al_mass_cont_function(winds, parameters, mult, mu)
+        Jmass, Jmass_grad = al_mass_cont_function(winds, parameters, mult.mass_cont, mu)
         al += Jmass
         al_grad += Jmass_grad
+
+    if parameters.Cv > 0:
+        Jvort, Jvort_grad = al_vert_vort_function(winds, parameters, mult.vert_vort, mu)
+        al += Jvort
+        al_grad += Jvort_grad
 
     return al, al_grad
 
@@ -94,8 +93,16 @@ class Callback:
         al_grad_zero[2,0,:,:] = 0
         self.gnew = np.linalg.norm(al_grad_zero.flatten())
         winds = np.reshape(xk, (3, self.parameters.grid_shape[0], self.parameters.grid_shape[1], self.parameters.grid_shape[2]))
-        div = calculate_mass_continuity(winds[0],winds[1],winds[2],self.parameters.z,self.parameters.dx,self.parameters.dy,self.parameters.dz)
-        cv = np.linalg.norm(div.flatten())
+        
+        cv2 = 0.0
+        if self.parameters.Cm > 0:
+            div = calculate_mass_continuity(winds[0],winds[1],winds[2],self.parameters.z,self.parameters.dx,self.parameters.dy,self.parameters.dz)
+            cv2 += np.linalg.norm(div.flatten())**2
+        if self.parameters.Cv > 0:
+            vort = calculate_vertical_vorticity(winds[0],winds[1],winds[2],self.parameters.dx,self.parameters.dy,self.parameters.dz,self.parameters.Ut,self.parameters.Vt)
+            cv2 += np.linalg.norm(vort.flatten())**2
+        cv = np.sqrt(cv2)
+
         if (alnew <= self.target):
             self.winds = xk
             self.alnew = alnew
@@ -104,7 +111,7 @@ class Callback:
             return True
         else:
             return False
-        #return False
+
 class RestoCallback:
     def __init__(self, AL_Filter, obj_func_zero, parameters):
         self.AL_Filter = AL_Filter
@@ -115,17 +122,27 @@ class RestoCallback:
         alnew, al_grad = self.obj_func_zero(xk,self.parameters)
         g = np.linalg.norm(al_grad)
         winds = np.reshape(xk, (3, self.parameters.grid_shape[0], self.parameters.grid_shape[1], self.parameters.grid_shape[2]))
-        div = calculate_mass_continuity(winds[0],winds[1],winds[2],self.parameters.z,self.parameters.dx,self.parameters.dy,self.parameters.dz)
-        cv = np.linalg.norm(div.flatten())
+        # COMPUTE TOTAL CONSTRAINT VIOLATION
+        cv2 = 0
+        if self.parameters.Cm > 0:
+            div = calculate_mass_continuity(winds[0],winds[1],winds[2],self.parameters.z,self.parameters.dx,self.parameters.dy,self.parameters.dz)
+            cv2 += np.linalg.norm(div.flatten())**2
+        if self.parameters.Cv > 0:
+            vort = calculate_vertical_vorticity(winds[0],winds[1],winds[2],self.parameters.dx,self.parameters.dy,self.parameters.dz,self.parameters.Ut,self.parameters.Vt)
+            cv2 += np.linalg.norm(vort.flatten())**2
+        cv = np.sqrt(cv2)
         self.cv = cv
         self.g = g
         self.al = alnew
-        if self.AL_Filter.check_acceptable(cv,g):#cv <= self.AL_Filter.beta*self.AL_Filter.cv_min:
+        if self.AL_Filter.check_acceptable(cv,g):
             self.winds = xk
             raise StopOptimizingException()
             return True
         else:
             return False
+
+class Multipliers(object):
+    pass
 
 def auglag(winds,parameters,bounds):
 
@@ -140,23 +157,30 @@ def auglag(winds,parameters,bounds):
 
     # generate a random initial point
     winds = np.reshape(winds, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
+    
     # ensure initial point satisfies impermeability condition:
     winds[2,-1,:,:] = 0
     winds[2,0,:,:] = 0
     
-    # generate a (very coarse) guess of Lagrange multipliers
-    div = calculate_mass_continuity(winds[0],winds[1],winds[2],parameters.z,parameters.dx,parameters.dy,parameters.dz)
-    mult = -mu*div.flatten()
+    # initialize a (very coarse) guess of Lagrange multipliers
+    mults = Multipliers()
+    cv02 = 0.0
+    if parameters.Cm > 0:
+        div = calculate_mass_continuity(winds[0],winds[1],winds[2],parameters.z,parameters.dx,parameters.dy,parameters.dz)
+        mults.mass_cont = -mu*div.flatten()
+        cv02 += np.linalg.norm(div.flatten())**2
+    if parameters.Cv > 0:
+        vort = calculate_vertical_vorticity(winds[0],winds[1],winds[2],parameters.dx,parameters.dy,parameters.dz,parameters.Ut,parameters.Vt)
+        mults.vert_vort = -mu*vort.flatten()
+        cv02 += np.linalg.norm(vort.flatten())**2
     winds = winds.flatten()
     
-    cv0 = np.linalg.norm(div.flatten())
-    cv = cv0
-    print("Initial constraint violation: ", "{:.6f}".format(cv0))
-    print("Initial maximum constraint violation: ",np.linalg.norm(div.flatten(),np.Inf))
+    cv = np.sqrt(cv02)
+    print("Initial constraint violation: ", "{:.6f}".format(cv))
     
     # initialize filter
     resto = False
-    obj_func = lambda winds, parameters: auglag_function(winds, parameters, mult, 0.0, resto)
+    obj_func = lambda winds, parameters: auglag_function(winds, parameters, mults, 0.0, resto)
     al, al_grad = obj_func(winds, parameters)
     al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
     al_grad[2,-1,:,:] = 0
@@ -164,22 +188,22 @@ def auglag(winds,parameters,bounds):
     g = np.linalg.norm(al_grad)
     print("Initial Lagrangian norm: ", "{:.6f}".format(g))
     Jvel, Jvelgrad = radial_velocity_function(winds, parameters)
-    AL_Filter = Filter(winds,cv0,g,Jvel)
+    AL_Filter = Filter(winds,cv,g,Jvel)
     
-    multk = mult
+    multk = copy.deepcopy(mults)
 
     iter_count = 1
     funcalls = 0
     while True:
         while True:
             # run L-BFGS-B with current fixed values of mult and mu 
-            obj_func = lambda winds, parameters: auglag_function(winds, parameters, mult, mu, resto)
+            obj_func = lambda winds, parameters: auglag_function(winds, parameters, mults, mu, resto)
             al_mu, al_grad = obj_func(winds.flatten(), parameters)
             al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
             al_grad[2,-1,:,:] = 0
             al_grad[2,0,:,:] = 0
             g_mu = np.linalg.norm(al_grad)
-            obj_func_zero = lambda winds, parameters: auglag_function(winds, parameters, mult, 0.0, resto)
+            obj_func_zero = lambda winds, parameters: auglag_function(winds, parameters, mults, 0.0, resto)
             try:
                 if iter_count > 1:
                     cb = Callback(al_mu,g_mu,cv,Jvel,AL_Filter,obj_func,obj_func_zero,parameters)
@@ -219,20 +243,25 @@ def auglag(winds,parameters,bounds):
                 g_mu = cb.g_mu
                 
             # compute constraint violation and Lagrangian stationary measure:
-            cv = 0.0
-        
+            cv2 = 0.0
             if parameters.Cm > 0:
                 div = calculate_mass_continuity(winds[0],winds[1],winds[2],parameters.z,parameters.dx,parameters.dy,parameters.dz)
                 div = div.flatten()
-                cv += np.linalg.norm(div)
+                cv2 += np.linalg.norm(div)**2
+            if parameters.Cv > 0:
+                vort = calculate_vertical_vorticity(winds[0],winds[1],winds[2],parameters.dx,parameters.dy,parameters.dz,parameters.Ut,parameters.Vt)
+                vort = vort.flatten()
+                cv2 += np.linalg.norm(vort)**2
+            cv = np.sqrt(cv2)
+
             # check if restoration is necessary:
             if AL_Filter.beta*np.maximum(AL_Filter.g_min/AL_Filter.gamma,AL_Filter.beta*AL_Filter.cv_min) <= cv or (g_mu <= gtol and cv >= AL_Filter.beta*AL_Filter.cv_min):
                 # increase penalty
                 mu = 2.0*mu
                 # run L-BFGS-B to minimize constraint violation
                 print("Restoration phase, mu = :", mu)
-                obj_func = lambda winds, parameters: auglag_function(winds, parameters, mult, mu, False)
-                obj_func_resto = lambda winds, parameters: auglag_function(winds, parameters, mult, mu, True)
+                obj_func = lambda winds, parameters: auglag_function(winds, parameters, mults, mu, False)
+                obj_func_resto = lambda winds, parameters: auglag_function(winds, parameters, mults, mu, True)
                 resto_cb = RestoCallback(AL_Filter,obj_func,parameters)
                 try:
                     winds = fmin_l_bfgs_b(obj_func_resto, winds, args=(parameters,), pgtol=0, callback=resto_cb, bounds=bounds, approx_grad=False, disp=1,iprint=-1)
@@ -249,7 +278,10 @@ def auglag(winds,parameters,bounds):
                     return winds, mult
             else:
                 # update multipliers
-                mult = multk - mu*div
+                if parameters.Cm > 0:
+                    mults.mass_cont = multk.mass_cont - mu*div
+                if parameters.Cv > 0:
+                    mults.vert_vort = multk.vert_vort - mu*vort
         
             # print some progress stats
             Jvel, Jvelgrad = radial_velocity_function(winds, parameters)
@@ -257,11 +289,19 @@ def auglag(winds,parameters,bounds):
             iter_count += 1
             print('Jvel: ',Jvel)
             print('Constraint violation: ', cv)
-            maxviol = np.linalg.norm(div.flatten(),np.Inf)
-            print("Maximum constraint violation: ",maxviol)
+            viols = np.array([])
+            if parameters.Cm > 0:
+                maxviol = np.linalg.norm(div.flatten(),np.Inf)
+                print("Maximum mass continuity violation: ",maxviol)
+                viols = np.append(viols,maxviol)
+            if parameters.Cv > 0:
+                maxviol = np.linalg.norm(vort.flatten(),np.Inf)
+                print("Maximum vertical vorticity violation: ",maxviol)
+                viols = np.append(viols,maxviol)
+            maxviol = np.amax(viols)
 
             # check if acceptable to filter
-            obj_func_zero = lambda winds, parameters: auglag_function(winds, parameters, mult, 0.0, resto)
+            obj_func_zero = lambda winds, parameters: auglag_function(winds, parameters, mults, 0.0, resto)
             alnew, al_grad = obj_func_zero(winds.flatten(),parameters)
             al_grad = np.reshape(al_grad, (3, parameters.grid_shape[0], parameters.grid_shape[1], parameters.grid_shape[2]))
             al_grad[2,-1,:,:] = 0
@@ -281,9 +321,9 @@ def auglag(winds,parameters,bounds):
         # add newest point to filter
         AL_Filter.add_to_filter(winds.flatten(),cv,g,Jvel)
         print("Added most recent point to filter")
-        multk = mult
+        multk = copy.deepcopy(mults)
 
-    return winds, mult, AL_Filter, funcalls
+    return winds, mults, AL_Filter, funcalls
 
 
 

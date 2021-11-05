@@ -44,7 +44,6 @@ def al_mass_cont_function(winds, parameters, mult, mu):
                        (3, parameters.grid_shape[0], parameters.grid_shape[1],
                                               parameters.grid_shape[2]))
 
-
     div = calculate_mass_continuity(
         winds[0], winds[1], winds[2], parameters.z,
         parameters.dx, parameters.dy, parameters.dz)
@@ -55,6 +54,7 @@ def al_mass_cont_function(winds, parameters, mult, mu):
     drho_dz = np.gradient(rho, parameters.dz, axis = 0)
     anel_coeffs = drho_dz/rho
     
+    # COMPUTING THE GRADIENT: THIS CAN BE REPLACED WITH JAX/TENSORFLOW/WHATEVER
     coeffs = mu*div-1.0*mult
     grad_w = -np.gradient(coeffs,parameters.dz,axis=0)
     grad_w[0,:,:] += ((-2.0/parameters.dz)*coeffs[0,:,:] + (0.5/parameters.dz)*coeffs[1,:,:])
@@ -73,47 +73,19 @@ def al_mass_cont_function(winds, parameters, mult, mu):
     grad_u[:,:,-2] += (0.5/parameters.dx)*coeffs[:,:,-1]
     grad_u[:,:,-1] += ((-0.5/parameters.dx)*coeffs[:,:,-2] + (2/parameters.dx)*coeffs[:,:,-1])
     
-    ## NASTY TRIPLE LOOP (FIGURE OUT HOW TO SIMPLIFY LATER)
-    #grad_u = np.zeros(np.shape(div))
-    #grad_v = np.zeros(np.shape(div))
-    #grad_w = np.zeros(np.shape(div))
-    #
-    #for i in range(parameters.grid_shape[0]):
-    #    for j in range(parameters.grid_shape[1]):
-    #        for k in range(parameters.grid_shape[2]):
-    #            coeff = mu*div[i,j,k]-1.0*mult[i,j,k]
-    #            if i == 0:
-    #                grad_w[0,j,k] += -1.0*coeff/parameters.dz
-    #                grad_w[1,j,k] += coeff/parameters.dz
-    #            elif i == parameters.grid_shape[0]-1:
-    #                grad_w[i,j,k] += coeff/parameters.dz
-    #                grad_w[i-1,j,k] += -1.0*coeff/parameters.dz
-    #            else:
-    #                grad_w[i-1,j,k] += -0.5*coeff/parameters.dz
-    #                grad_w[i+1,j,k] += 0.5*coeff/parameters.dz
-    #            grad_w[i,j,k] += coeff*anel_coeffs[i,j,k]
-    #            if j == 0:
-    #                grad_v[i,0,k] += -1.0*coeff/parameters.dy
-    #                grad_v[i,1,k] += coeff/parameters.dy
-    #            elif j == parameters.grid_shape[1]-1:
-    #                grad_v[i,j,k] += coeff/parameters.dy
-    #                grad_v[i,j-1,k] += -1.0*coeff/parameters.dy
-    #            else:
-    #                grad_v[i,j-1,k] += -0.5*coeff/parameters.dy
-    #                grad_v[i,j+1,k] += 0.5*coeff/parameters.dy
-    #            if k == 0:
-    #                grad_u[i,j,0] += -1.0*coeff/parameters.dx
-    #                grad_u[i,j,1] += coeff/parameters.dx
-    #            elif k == parameters.grid_shape[2]-1:
-    #                grad_u[i,j,k] += coeff/parameters.dx
-    #                grad_u[i,j,k-1] += -1.0*coeff/parameters.dx
-    #            else:
-    #                grad_u[i,j,k-1] += -0.5*coeff/parameters.dx
-    #                grad_u[i,j,k+1] += 0.5*coeff/parameters.dx
-
     al = -np.sum(mult*div) + (mu/2.0)*np.sum(div**2)
     
     al_grad = np.stack([grad_u, grad_v, grad_w], axis=0)
+
+    return al, al_grad.flatten()
+
+def al_vert_vort_function(winds, parameters, mult, mu):
+    
+    vort = calculate_vertical_vorticity(winds[0], winds[1], winds[2], parameters.dx, parameters.dy, parameters.dz, parameters.Ut, parameters.Vt)
+
+    al = -np.sum(mult*vort) + (mu/2.0)*np.sum(vort**2)
+
+    al_grad = 0 ### IMPLEMENT THIS - should be of the form np.stack([grad_u,grad_v,grad_w],axis=0)
 
     return al, al_grad.flatten()
 
@@ -905,6 +877,66 @@ def calculate_background_gradient(u, v, w, weights, u_back, v_back, Cb=0.01):
     y = np.stack([u_grad, v_grad, w_grad], axis=0)
     return y.flatten()
 
+def calculate_vertical_vorticity(u, v, w, dx, dy, dz, Ut, Vt):
+    """
+    Calculates the cost function due to deviance from vertical vorticity
+    equation. For more information of the vertical vorticity cost function,
+    see Potvin et al. (2012) and Shapiro et al. (2009).
+
+    Parameters
+    ----------
+    u: 3D array
+        Float array with u component of wind field
+    v: 3D array
+        Float array with v component of wind field
+    w: 3D array
+        Float array with w component of wind field
+    dx: float array
+        Spacing in x grid
+    dy: float array
+        Spacing in y grid
+    dz: float array
+        Spacing in z grid
+    coeff: float
+        Weighting coefficient
+    Ut: float
+        U component of storm motion
+    Vt: float
+        V component of storm motion
+
+    Returns
+    -------
+    Jv: float
+        Value of vertical vorticity cost function.
+
+    References
+    ----------
+
+    Potvin, C.K., A. Shapiro, and M. Xue, 2012: Impact of a Vertical Vorticity
+    Constraint in Variational Dual-Doppler Wind Analysis: Tests with Real and
+    Simulated Supercell Data. J. Atmos. Oceanic Technol., 29, 32–49,
+    https://doi.org/10.1175/JTECH-D-11-00019.1
+
+    Shapiro, A., C.K. Potvin, and J. Gao, 2009: Use of a Vertical Vorticity
+    Equation in Variational Dual-Doppler Wind Analysis. J. Atmos. Oceanic
+    Technol., 26, 2089–2106, https://doi.org/10.1175/2009JTECHA1256.1
+    """
+    dvdz = np.gradient(v, dz, axis=0)
+    dudz = np.gradient(u, dz, axis=0)
+    dvdx = np.gradient(v, dx, axis=2)
+    dwdy = np.gradient(w, dy, axis=1)
+    dwdx = np.gradient(w, dx, axis=2)
+    dudx = np.gradient(u, dx, axis=2)
+    dvdy = np.gradient(v, dy, axis=2)
+    dudy = np.gradient(u, dy, axis=1)
+    zeta = dvdx - dudy
+    dzeta_dx = np.gradient(zeta, dx, axis=2)
+    dzeta_dy = np.gradient(zeta, dy, axis=1)
+    dzeta_dz = np.gradient(zeta, dz, axis=0)
+    jv_array = ((u - Ut) * dzeta_dx + (v - Vt) * dzeta_dy +
+                w * dzeta_dz + (dvdz * dwdx - dudz * dwdy) +
+                zeta * (dudx + dvdy))
+    return jv_array
 
 def calculate_vertical_vorticity_cost(u, v, w, dx, dy, dz, Ut, Vt,
                                       coeff=1e-5):
